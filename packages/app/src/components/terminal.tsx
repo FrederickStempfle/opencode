@@ -19,6 +19,7 @@ import { terminalWebSocketURL } from "@/utils/terminal-websocket-url"
 
 const TOGGLE_TERMINAL_ID = "terminal.toggle"
 const DEFAULT_TOGGLE_TERMINAL_KEYBIND = "ctrl+`"
+const TERMINAL_FONT_SIZE = 12
 export interface TerminalProps extends ComponentProps<"div"> {
   pty: LocalPTY
   autoFocus?: boolean
@@ -41,7 +42,70 @@ const loadGhostty = () => {
   return shared
 }
 
-type TerminalColors = {
+type AnsiPalette = {
+  black: string
+  red: string
+  green: string
+  yellow: string
+  blue: string
+  magenta: string
+  cyan: string
+  white: string
+  brightBlack: string
+  brightRed: string
+  brightGreen: string
+  brightYellow: string
+  brightBlue: string
+  brightMagenta: string
+  brightCyan: string
+  brightWhite: string
+}
+
+// Conventional 16-color ANSI palettes (VS Code's defaults). The app theme only
+// defines bg/fg/cursor — it has no ANSI colors — so without these ghostty-web
+// falls back to its own pure-black-tuned defaults, which read as harsh/"weird"
+// against the themed terminal background. We keep these fixed per light/dark so
+// terminal programs get the conventional ANSI semantics they expect.
+const ANSI_PALETTE: Record<"light" | "dark", AnsiPalette> = {
+  dark: {
+    black: "#3b3535",
+    red: "#cd3131",
+    green: "#0dbc79",
+    yellow: "#e5e510",
+    blue: "#2472c8",
+    magenta: "#bc3fbc",
+    cyan: "#11a8cd",
+    white: "#e5e5e5",
+    brightBlack: "#7a7070",
+    brightRed: "#f14c4c",
+    brightGreen: "#23d18b",
+    brightYellow: "#f5f543",
+    brightBlue: "#3b8eea",
+    brightMagenta: "#d670d6",
+    brightCyan: "#29b8db",
+    brightWhite: "#f5f5f5",
+  },
+  light: {
+    black: "#211e1e",
+    red: "#cd3131",
+    green: "#108548",
+    yellow: "#8d6c00",
+    blue: "#0451a5",
+    magenta: "#a4339d",
+    cyan: "#0598a8",
+    white: "#555555",
+    brightBlack: "#7a7070",
+    brightRed: "#cd3131",
+    brightGreen: "#14ce14",
+    brightYellow: "#b5740a",
+    brightBlue: "#0451a5",
+    brightMagenta: "#bc05bc",
+    brightCyan: "#0598bc",
+    brightWhite: "#2a2626",
+  },
+}
+
+type TerminalColors = AnsiPalette & {
   background: string
   foreground: string
   cursor: string
@@ -50,12 +114,14 @@ type TerminalColors = {
 
 const DEFAULT_TERMINAL_COLORS: Record<"light" | "dark", TerminalColors> = {
   light: {
+    ...ANSI_PALETTE.light,
     background: "#fcfcfc",
     foreground: "#211e1e",
     cursor: "#211e1e",
     selectionBackground: withAlpha("#211e1e", 0.2),
   },
   dark: {
+    ...ANSI_PALETTE.dark,
     background: "#191515",
     foreground: "#d4d4d4",
     cursor: "#d4d4d4",
@@ -241,6 +307,7 @@ export const Terminal = (props: TerminalProps) => {
     const base = text.startsWith("#") ? (text as HexColor) : (fallback.foreground as HexColor)
     const selectionBackground = withAlpha(base, alpha)
     return {
+      ...ANSI_PALETTE[mode],
       background,
       foreground: text,
       cursor: text,
@@ -353,7 +420,7 @@ export const Terminal = (props: TerminalProps) => {
         cursorStyle: "bar",
         cols: restoreSize?.cols,
         rows: restoreSize?.rows,
-        fontSize: 14,
+        fontSize: TERMINAL_FONT_SIZE,
         fontFamily: terminalFontFamily(settings.appearance.terminalFont()),
         allowTransparency: false,
         convertEol: false,
@@ -418,6 +485,10 @@ export const Terminal = (props: TerminalProps) => {
       cleanups.push(() => disposeIfDisposable(onResize))
       const onData = t.onData((data) => {
         if (ws?.readyState === WebSocket.OPEN) ws.send(data)
+        // ghostty-web has no `scrollOnUserInput`, so the viewport doesn't follow
+        // the cursor when typing — leaving the prompt below the fold ("typing
+        // below where it ended"). Snap to the bottom on every keystroke.
+        t.scrollToBottom()
       })
       cleanups.push(() => disposeIfDisposable(onData))
       const onKey = t.onKey((key) => {
