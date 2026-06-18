@@ -1,75 +1,62 @@
 import { describe, expect, test } from "bun:test"
-import type { Part } from "@opencode-ai/sdk/v2"
-import { extractReply, parseVerdict, shouldEvaluate, withTimeout } from "./goal-runner"
+import { parseStructuredTitle, parseStructuredVerdict, shouldEvaluate, withTimeout } from "./goal-runner"
 
-const textPart = (text: string) => ({ type: "text", text }) as Part
-const reasoningPart = (text: string) => ({ type: "reasoning", text }) as Part
-const toolPart = () => ({ type: "tool", tool: "bash", state: { status: "completed" } }) as Part
-
-describe("parseVerdict", () => {
-  test("reads structured JSON output", () => {
-    expect(parseVerdict('{"met": true, "reason": "Tests pass."}')).toEqual({ met: true, reason: "Tests pass." })
-    expect(parseVerdict('{"met": false, "reason": "No tests run yet."}')).toEqual({
+describe("parseStructuredVerdict", () => {
+  test("passes a valid verdict through, trimming and collapsing the reason", () => {
+    expect(parseStructuredVerdict({ met: true, reason: "tests   pass" })).toEqual({ met: true, reason: "tests pass" })
+    expect(parseStructuredVerdict({ met: false, reason: "  build\nfails  " })).toEqual({
       met: false,
-      reason: "No tests run yet.",
+      reason: "build fails",
     })
   })
 
-  test("salvages JSON embedded in prose or code fences", () => {
-    const fenced = 'Here is my verdict:\n```json\n{"met": true, "reason": "Done."}\n```'
-    expect(parseVerdict(fenced)).toEqual({ met: true, reason: "Done." })
+  test("fills a met-dependent default when the reason is empty", () => {
+    expect(parseStructuredVerdict({ met: true, reason: "   " })).toEqual({ met: true, reason: "Condition satisfied." })
+    expect(parseStructuredVerdict({ met: false, reason: "" })).toEqual({
+      met: false,
+      reason: "Condition not yet satisfied.",
+    })
   })
 
-  test("fills a default reason when JSON omits one", () => {
-    expect(parseVerdict('{"met": true}')).toEqual({ met: true, reason: "Condition satisfied." })
-    expect(parseVerdict('{"met": false}')).toEqual({ met: false, reason: "Condition not yet satisfied." })
+  test("truncates an overlong reason to 240 chars", () => {
+    const verdict = parseStructuredVerdict({ met: true, reason: "x".repeat(500) })
+    expect(verdict?.reason.length).toBe(240)
   })
 
-  test("reads a leading YES/NO, tolerating markdown and prefixes", () => {
-    expect(parseVerdict("YES\nThe feature is implemented.")?.met).toBe(true)
-    expect(parseVerdict("**NO** — still missing the migration.")?.met).toBe(false)
-    expect(parseVerdict("Answer: yes, everything compiles.")?.met).toBe(true)
+  test("ignores extra properties alongside a valid verdict", () => {
+    expect(parseStructuredVerdict({ met: true, reason: "ok", extra: 1 })).toEqual({ met: true, reason: "ok" })
   })
 
-  test("reads met/not-met phrasing from prose", () => {
-    expect(parseVerdict("The condition is not yet met because the build fails.")?.met).toBe(false)
-    expect(parseVerdict("The goal has been fully satisfied.")?.met).toBe(true)
+  test("returns null when structured output is absent (StructuredOutputError / no key)", () => {
+    expect(parseStructuredVerdict(undefined)).toBeNull()
+    expect(parseStructuredVerdict(null)).toBeNull()
   })
 
-  test("returns null when there is no verdict to read (e.g. empty / unauthenticated)", () => {
-    expect(parseVerdict("")).toBeNull()
-    expect(parseVerdict("   ")).toBeNull()
-    expect(parseVerdict("I am not sure what you are asking about here.")).toBeNull()
-  })
-
-  test("ignores JSON that has no verdict field", () => {
-    expect(parseVerdict('{"foo": "bar"}')).toBeNull()
-  })
-
-  test("coerces stringy met values from sloppy models", () => {
-    expect(parseVerdict('{"met": "true", "reason": "ok"}')).toEqual({ met: true, reason: "ok" })
-    expect(parseVerdict('{"met": "false", "reason": "nope"}')).toEqual({ met: false, reason: "nope" })
+  test("returns null for a non-object or malformed shape", () => {
+    expect(parseStructuredVerdict("yes")).toBeNull()
+    expect(parseStructuredVerdict(42)).toBeNull()
+    expect(parseStructuredVerdict([])).toBeNull()
+    expect(parseStructuredVerdict({ reason: "missing met" })).toBeNull()
+    expect(parseStructuredVerdict({ met: "yes", reason: "wrong type" })).toBeNull()
+    expect(parseStructuredVerdict({ met: true })).toBeNull()
+    expect(parseStructuredVerdict({ met: true, reason: 1 })).toBeNull()
   })
 })
 
-describe("extractReply", () => {
-  test("joins text parts", () => {
-    expect(extractReply([textPart("YES"), textPart("done")])).toBe("YES\ndone")
+describe("parseStructuredTitle", () => {
+  test("returns a cleaned, first-line, 60-char-capped title", () => {
+    expect(parseStructuredTitle({ title: "  Add dark mode toggle  " })).toBe("Add dark mode toggle")
+    expect(parseStructuredTitle({ title: "First line\nsecond line" })).toBe("First line")
+    expect(parseStructuredTitle({ title: "t".repeat(80) })?.length).toBe(60)
   })
 
-  test("falls back to reasoning parts when no text part has content", () => {
-    expect(extractReply([toolPart(), reasoningPart('{"met": false, "reason": "wip"}')])).toBe(
-      '{"met": false, "reason": "wip"}',
-    )
-  })
-
-  test("prefers text parts over reasoning parts", () => {
-    expect(extractReply([reasoningPart("thinking..."), textPart("NO")])).toBe("NO")
-  })
-
-  test("returns empty string when there is nothing to read", () => {
-    expect(extractReply([toolPart()])).toBe("")
-    expect(extractReply([])).toBe("")
+  test("returns null when the title is empty, missing, or wrong-typed", () => {
+    expect(parseStructuredTitle({ title: "   " })).toBeNull()
+    expect(parseStructuredTitle({ title: 5 })).toBeNull()
+    expect(parseStructuredTitle({})).toBeNull()
+    expect(parseStructuredTitle(null)).toBeNull()
+    expect(parseStructuredTitle(undefined)).toBeNull()
+    expect(parseStructuredTitle("Add dark mode")).toBeNull()
   })
 })
 
@@ -109,16 +96,5 @@ describe("withTimeout", () => {
   test("rejects when the promise outlasts the timeout", async () => {
     const slow = new Promise((resolve) => setTimeout(resolve, 50))
     await expect(withTimeout(slow, 5)).rejects.toThrow(/timed out/)
-  })
-})
-
-describe("evaluator pipeline (extract then parse)", () => {
-  test("a reasoning-only JSON verdict is read end-to-end", () => {
-    const parts = [toolPart(), reasoningPart('{"met": true, "reason": "All checks green."}')]
-    expect(parseVerdict(extractReply(parts))).toEqual({ met: true, reason: "All checks green." })
-  })
-
-  test("an empty response (no API key) yields no verdict, so the runner pauses", () => {
-    expect(parseVerdict(extractReply([]))).toBeNull()
   })
 })

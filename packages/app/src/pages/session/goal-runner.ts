@@ -28,15 +28,45 @@ const NO_TOOLS = { "*": false } as const
 // EVAL_SYSTEM forbids mutating commands; the deny-all base blocks edit/write/patch.
 const EVAL_TOOLS = { "*": false, read: true, grep: true, glob: true, list: true, bash: true } as const
 
-// Plain YES/NO protocol (no structured-output format): parseable by every model.
-// Structured output (json_schema) is intentionally avoided — models that don't comply
-// trigger server-side retry loops, turning one check into several slow inferences.
+// The verdict and title come back as schema-validated structured output, not parsed prose.
+// The server forces the model to call its `StructuredOutput` tool (toolChoice: "required")
+// and validates the JSON against the schema before we ever see it — so a model is free to
+// reason as much as it wants, and a thinking model's chain-of-thought never reaches us as
+// the answer. We read the result directly off the assistant message's `structured` field.
 const EVAL_SYSTEM = `You are a strict completion evaluator for an autonomous coding agent.
 Decide whether the GOAL CONDITION is fully satisfied. Do NOT trust the agent's claims — actively VERIFY them: use read/grep/glob/list to inspect files, and run read-only commands (tests, builds, linters) with bash to confirm behaviour. NEVER modify files or run commands that change state (no writes, installs, migrations, network mutations).
 If the evidence is incomplete, ambiguous, unverified, or merely claimed without proof, it is NOT satisfied.
-When done verifying, reply with exactly one word on the first line: YES or NO. On the second line, give one short sentence stating what you verified and why it is or isn't met. Output nothing else.`
+When you have finished verifying, report your decision via the structured output: \`met\` (whether the goal condition is fully satisfied and verified) and a one-sentence \`reason\`.`
 
-const SUMMARY_SYSTEM = `Summarize the user's goal as a short title of 3 to 6 words. Output only the title — no quotes, no surrounding text, no trailing punctuation.`
+const SUMMARY_SYSTEM = `Summarize the user's goal as a short title of 3 to 6 words, returned via the structured output \`title\` field. No quotes, no surrounding text, no trailing punctuation.`
+
+// Closed schemas for the two structured-output calls. `additionalProperties: false` keeps the
+// object exactly these fields (and is required by some providers' strict JSON-schema mode).
+const VERDICT_SCHEMA = {
+  type: "object",
+  properties: {
+    met: {
+      type: "boolean",
+      description:
+        "True only if the GOAL CONDITION is fully satisfied AND you have actively verified it against the workspace (not merely the agent's claim). False if anything is incomplete, ambiguous, unverified, or only claimed.",
+    },
+    reason: {
+      type: "string",
+      description: "One short sentence: when met, what you verified; when not met, the specific gap that remains.",
+    },
+  },
+  required: ["met", "reason"],
+  additionalProperties: false,
+} as const
+
+const TITLE_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string", description: "A 3 to 6 word title summarizing the goal." },
+  },
+  required: ["title"],
+  additionalProperties: false,
+} as const
 
 type GoalRunnerInput = {
   sessionID: () => string | undefined
@@ -85,21 +115,6 @@ export function shouldEvaluate(input: {
   return input.finishedTurn && input.active && !input.evaluating && !input.blocked
 }
 
-function joinText(parts: readonly Part[]): string {
-  return parts.flatMap((part) => (part.type === "text" && part.text ? [part.text] : [])).join("\n").trim()
-}
-
-// The evaluator's answer is normally a text part, but some models surface it only in a
-// reasoning part — fall back to any part carrying string text so we don't read "nothing".
-export function extractReply(parts: readonly Part[]): string {
-  const text = joinText(parts)
-  if (text) return text
-  return parts
-    .flatMap((part) => ("text" in part && typeof part.text === "string" ? [part.text] : []))
-    .join("\n")
-    .trim()
-}
-
 function partToText(part: Part, outputLimit: number): string[] {
   if (part.type === "text") return part.text ? [part.text] : []
   if (part.type === "tool") {
@@ -125,53 +140,27 @@ function buildTranscript(input: GoalRunnerInput, sessionID: string): string {
   return text.length > TRANSCRIPT_LIMIT ? text.slice(-TRANSCRIPT_LIMIT) : text
 }
 
-// Read a verdict from the evaluator across model behaviours: a JSON object (structured
-// output), a leading YES/NO line, or an explicit "met"/"not met" phrase. Returns null
-// when the response genuinely can't be interpreted — the caller pauses rather than
-// blindly continuing, so a confused evaluator can't drive an infinite loop.
-export function parseVerdict(raw: string): { met: boolean; reason: string } | null {
-  if (!raw) return null
+// Validate the evaluator's structured output into a verdict. The shape is already enforced
+// server-side (forced StructuredOutput tool + schema validation), but we revalidate at the
+// boundary. Returns null when the object is absent or malformed — i.e. the model never
+// called StructuredOutput (the server set a StructuredOutputError) — so the caller pauses
+// and retries rather than guessing. An empty reason is backfilled with a default.
+export function parseStructuredVerdict(structured: unknown): { met: boolean; reason: string } | null {
+  if (typeof structured !== "object" || structured === null) return null
+  const obj = structured as Record<string, unknown>
+  if (typeof obj.met !== "boolean" || typeof obj.reason !== "string") return null
+  const reason = obj.reason.trim().replace(/\s+/g, " ").slice(0, 240)
+  return { met: obj.met, reason: reason || (obj.met ? "Condition satisfied." : "Condition not yet satisfied.") }
+}
 
-  const fromObject = (value: unknown): { met: boolean; reason: string } | undefined => {
-    if (typeof value !== "object" || value === null) return undefined
-    const record = value as Record<string, unknown>
-    // Coerce the common stringy variants ("true"/"yes") so a model that emits met as a
-    // string still parses; anything else means this isn't a real verdict object.
-    const met = record.met
-    const isMet = met === true || met === "true" || met === "yes"
-    const isNotMet = met === false || met === "false" || met === "no"
-    if (!isMet && !isNotMet) return undefined
-    return { met: isMet, reason: typeof record.reason === "string" ? record.reason : "" }
-  }
-
-  for (const candidate of [raw, raw.match(/\{[\s\S]*\}/)?.[0]]) {
-    if (!candidate) continue
-    try {
-      const parsed = fromObject(JSON.parse(candidate))
-      if (parsed) return parsed.reason ? parsed : { met: parsed.met, reason: parsed.met ? "Condition satisfied." : "Condition not yet satisfied." }
-    } catch {
-      // not JSON — try the text protocol below
-    }
-  }
-
-  const trimmed = raw.trim()
-  const reason = trimmed.replace(/\s+/g, " ").slice(0, 240)
-
-  // A YES/NO near the start (tolerating markdown/"Answer:" wrappers) is the verdict.
-  const head = trimmed.slice(0, 80).toLowerCase().match(/\b(yes|no)\b/)
-  if (head) {
-    const met = head[1] === "yes"
-    return { met, reason: reason || (met ? "Condition satisfied." : "Condition not yet satisfied.") }
-  }
-
-  const lower = trimmed.toLowerCase()
-  if (/\bnot\s+(?:yet\s+)?(?:met|complete|completed|satisfied|achieved)\b|\bincomplete\b|\bunmet\b/.test(lower)) {
-    return { met: false, reason }
-  }
-  if (/\b(?:fully\s+)?(?:met|complete|completed|satisfied|achieved)\b/.test(lower)) {
-    return { met: true, reason }
-  }
-  return null
+// Validate the summarizer's structured output into a display title. Returns null when
+// absent or malformed, so the caller falls back to its default.
+export function parseStructuredTitle(structured: unknown): string | null {
+  if (typeof structured !== "object" || structured === null) return null
+  const title = (structured as Record<string, unknown>).title
+  if (typeof title !== "string") return null
+  const cleaned = title.split("\n")[0].trim().slice(0, 60).trim()
+  return cleaned || null
 }
 
 /**
@@ -240,16 +229,13 @@ export function createGoalRunner(input: GoalRunnerInput) {
           model,
           tools: NO_TOOLS,
           system: SUMMARY_SYSTEM,
+          format: { type: "json_schema", schema: TITLE_SCHEMA },
           parts: [{ type: "text", text: goal.condition }],
         }),
         EVAL_TIMEOUT_MS,
       )
-      const summary = joinText(response.data?.parts ?? [])
-        .split("\n")[0]
-        .replace(/^["'`]|["'`]$/g, "")
-        .slice(0, 60)
-        .trim()
-      input.updateGoal({ summary: summary || "Goal" })
+      const summary = parseStructuredTitle(response.data?.info?.structured)
+      input.updateGoal({ summary: summary ?? "Goal" })
     } catch {
       // Leave summary undefined; the status toast falls back to a truncated condition.
     } finally {
@@ -288,11 +274,12 @@ export function createGoalRunner(input: GoalRunnerInput) {
               model,
               tools: EVAL_TOOLS,
               system: EVAL_SYSTEM,
+              format: { type: "json_schema", schema: VERDICT_SCHEMA },
               parts: [{ type: "text", text: promptText }],
             }),
             EVAL_TIMEOUT_MS,
           )
-          return parseVerdict(extractReply(response.data?.parts ?? []))
+          return parseStructuredVerdict(response.data?.info?.structured)
         } catch {
           return null
         }
