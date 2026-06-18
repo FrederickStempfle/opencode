@@ -1700,7 +1700,11 @@ export default function Page() {
 
           <Show when={desktopReviewOpen()}>
             <div
-              class="relative z-30 transition-opacity duration-[240ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+              // No `relative` here: the handle is `position: absolute; inset-block: 0`,
+              // so it must anchor to the full-height chat column. A positioned wrapper
+              // would become its containing block and collapse it to 0px tall (the
+              // wrapper has no in-flow content), making the handle impossible to grab.
+              class="z-30 transition-opacity duration-[240ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
               classList={{ "opacity-0": !reviewSettled(), "opacity-100": reviewSettled() }}
               onPointerDown={() => size.start()}
             >
@@ -1711,7 +1715,12 @@ export default function Page() {
                 direction="horizontal"
                 size={layout.session.width()}
                 min={450}
-                max={typeof window === "undefined" ? 1000 : window.innerWidth * 0.45}
+                // This caps the chat column, but the side panel is the remainder
+                // (`calc(100% - session.width)`), so the real effect is the side
+                // panel's *minimum* width. Cap the chat at viewport-minus-640 so
+                // the panel can be dragged down to ~640px instead of being pinned
+                // at 55% of the screen.
+                max={typeof window === "undefined" ? 1000 : Math.max(450, window.innerWidth - 640)}
                 onResize={(width) => {
                   size.touch()
                   layout.session.resize(width)
