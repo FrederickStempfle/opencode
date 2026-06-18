@@ -54,7 +54,7 @@ const HOME_ROW_LAYOUT =
 const HOME_ROW_BASE = `${HOME_ROW_LAYOUT} border-0`
 const HOME_ROW = `${HOME_ROW_BASE} [font-weight:530] text-v2-text-text-muted hover:bg-v2-overlay-simple-overlay-hover focus-visible:bg-v2-overlay-simple-overlay-hover`
 const HOME_PROJECT_NAV_LABEL = "min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap"
-const HOME_PROJECT_NAV_ROW = `${HOME_ROW_LAYOUT} h-7 gap-2 px-1.5 [font-weight:440] text-v2-text-text-muted hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base hover:[box-shadow:inset_0_0_0_0.5px_var(--v2-border-border-muted)] data-[selected]:bg-v2-background-bg-layer-03 data-[selected]:text-v2-text-text-base data-[selected]:[box-shadow:inset_0_0_0_0.5px_var(--v2-border-border-muted)] data-[selected]:hover:bg-v2-background-bg-layer-03 focus-visible:bg-v2-background-bg-layer-01 focus-visible:text-v2-text-text-base focus-visible:[box-shadow:inset_0_0_0_0.5px_var(--v2-border-border-muted)]`
+const HOME_PROJECT_NAV_ROW = `${HOME_ROW_LAYOUT} gap-2 px-1.5 [font-weight:440] text-v2-text-text-muted hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base hover:[box-shadow:inset_0_0_0_0.5px_var(--v2-border-border-muted)] data-[selected]:bg-v2-background-bg-layer-03 data-[selected]:text-v2-text-text-base data-[selected]:[box-shadow:inset_0_0_0_0.5px_var(--v2-border-border-muted)] data-[selected]:hover:bg-v2-background-bg-layer-03 focus-visible:bg-v2-background-bg-layer-01 focus-visible:text-v2-text-text-base focus-visible:[box-shadow:inset_0_0_0_0.5px_var(--v2-border-border-muted)]`
 const HOME_SECTION_LABEL = "text-v2-text-text-muted [font-weight:440]"
 
 type HomeSessionRecord = {
@@ -125,7 +125,6 @@ export default function Home() {
 function HomeDesign() {
   const sync = useServerSync()
   const layout = useLayout()
-  const platform = usePlatform()
   const pickDirectory = useDirectoryPicker()
   const dialog = useDialog()
   const navigate = useNavigate()
@@ -360,7 +359,6 @@ function HomeDesign() {
           clearNotifications={clearNotifications}
           unseenCount={unseenCount}
           openSettings={openSettings}
-          openHelp={() => platform.openLink("https://opencode.ai/desktop-feedback")}
           language={language}
         />
 
@@ -446,15 +444,14 @@ function HomeProjectColumn(props: {
   clearNotifications: (server: ServerConnection.Any, project: LocalProject) => void
   unseenCount: (server: ServerConnection.Any, project: LocalProject) => number
   openSettings: () => void
-  openHelp: () => void
   language: ReturnType<typeof useLanguage>
 }) {
   const global = useGlobal()
   const dialog = useDialog()
   const controller = useServerManagementController({ navigateOnAdd: false })
   return (
-    <aside class="flex min-w-0 flex-col lg:pt-[52px] mt-14 gap-4" aria-label={props.language.t("home.projects")}>
-      <div class="flex h-7 min-w-0 items-center justify-between pl-1.5">
+    <aside class="flex min-w-0 flex-col lg:pt-[20px] gap-4" aria-label={props.language.t("home.projects")}>
+      <div class="flex h-7 min-w-0 items-center justify-between pl-1.5 -ml-12">
         <div class={HOME_SECTION_LABEL}>{props.language.t("home.projects")}</div>
         <Show when={global.servers.list().length === 1}>
           <IconButtonV2
@@ -499,22 +496,14 @@ function HomeProjectColumn(props: {
           }}
         </For>
       </Show>
-      <div class="mt-4 flex min-w-0 flex-col gap-1">
+      <div class="mt-auto -mb-12 -ml-12 flex min-w-0 flex-col gap-1">
         <button
           type="button"
-          class={`${HOME_PROJECT_NAV_ROW} text-v2-text-text-faint [&>[data-slot=icon-svg]]:text-v2-icon-icon-muted`}
+          class={`${HOME_PROJECT_NAV_ROW} h-7 text-v2-text-text-faint [&>[data-slot=icon-svg]]:text-v2-icon-icon-muted`}
           onClick={props.openSettings}
         >
           <IconV2 name="settings-gear" size="small" />
           <span class={HOME_PROJECT_NAV_LABEL}>{props.language.t("sidebar.settings")}</span>
-        </button>
-        <button
-          type="button"
-          class={`${HOME_PROJECT_NAV_ROW} text-v2-text-text-faint [&>[data-slot=icon-svg]]:text-v2-icon-icon-muted`}
-          onClick={props.openHelp}
-        >
-          <IconV2 name="help" size="small" />
-          <span class={HOME_PROJECT_NAV_LABEL}>{props.language.t("sidebar.help")}</span>
         </button>
       </div>
     </aside>
@@ -537,7 +526,7 @@ function HomeServerRow(props: {
     <div class="group/server relative flex h-7 min-w-0 items-center rounded-[6px]">
       <button
         type="button"
-        class={`${HOME_PROJECT_NAV_ROW} pr-16 disabled:opacity-60`}
+        class={`${HOME_PROJECT_NAV_ROW} h-7 pr-16 disabled:opacity-60`}
         data-selected={props.selected ? "" : undefined}
         disabled={!props.healthy}
         onClick={() => props.focusServer(props.server)}
@@ -593,7 +582,7 @@ function HomeProjectList(props: {
   language: ReturnType<typeof useLanguage>
 }) {
   return (
-    <div class="flex min-w-0 flex-col gap-1">
+    <div class="-ml-12 flex min-w-0 flex-col gap-1">
       <For each={props.projects}>
         {(project) => (
           <HomeProjectRow
@@ -631,17 +620,23 @@ function HomeProjectRow(props: {
 }) {
   const [state, setState] = createStore({ menuOpen: false })
   return (
-    <div class="group/project relative flex h-7 min-w-0 items-center rounded-[6px]">
+    <div
+      class="group/project relative flex h-7 min-w-0 items-center rounded-[6px]"
+      onContextMenu={(event) => {
+        event.preventDefault()
+        setState("menuOpen", true)
+      }}
+    >
       <button
         type="button"
         data-component="home-project-row"
-        class={`${HOME_PROJECT_NAV_ROW} pr-16`}
+        class={`${HOME_PROJECT_NAV_ROW} h-7 pr-16`}
         data-selected={props.selected ? "" : undefined}
         aria-current={props.selected ? "page" : undefined}
         onClick={() => props.selectProject(props.server, props.project.worktree)}
       >
         <HomeProjectAvatar project={props.project} />
-        <span class={HOME_PROJECT_NAV_LABEL}>{displayName(props.project)}</span>
+        <span class={`${HOME_PROJECT_NAV_LABEL} text-v2-text-text-base`}>{displayName(props.project)}</span>
       </button>
       <div
         class="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity group-hover/project:opacity-100 focus-within:opacity-100 data-[menu=true]:opacity-100"
@@ -696,14 +691,19 @@ function HomeProjectRow(props: {
   )
 }
 
-function HomeProjectAvatar(props: { project: LocalProject }) {
-  const name = createMemo(() => displayName(props.project))
+function HomeProjectAvatar(_props: { project: LocalProject }) {
   return (
-    <ProjectAvatar
-      fallback={name()}
-      src={getProjectAvatarSource(props.project.id, props.project.icon)}
-      variant={getProjectAvatarVariant(props.project.icon?.color)}
-    />
+    <svg
+      class="size-4 text-v2-icon-icon-muted"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.25"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M2 4.75C2 4.06 2.56 3.5 3.25 3.5h2.59c.33 0 .65.13.88.37l.9.9c.24.23.55.36.88.36h4.25c.69 0 1.25.56 1.25 1.25v5.12c0 .69-.56 1.25-1.25 1.25H3.25C2.56 13.75 2 13.19 2 12.5V4.75Z" />
+    </svg>
   )
 }
 

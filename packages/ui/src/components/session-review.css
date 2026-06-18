@@ -69,20 +69,27 @@
     background-color: var(--surface-base-active);
   }
 
-  [data-slot="accordion-item"] {
-    [data-slot="accordion-content"] {
-      display: none;
-    }
-    &[data-expanded] {
-      [data-slot="accordion-content"] {
-        display: block;
-      }
-    }
-  }
-
   [data-slot="accordion-content"] {
+    overflow: hidden;
     -webkit-user-select: text;
     user-select: text;
+  }
+
+  /* Animate the diff height when a file row expands/collapses, driven by
+     Kobalte's --kb-accordion-content-height (keyframes live in accordion.css). */
+  [data-slot="accordion-content"][data-expanded] {
+    animation: slideDown 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  [data-slot="accordion-content"][data-closed] {
+    animation: slideUp 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    [data-slot="accordion-content"][data-expanded],
+    [data-slot="accordion-content"][data-closed] {
+      animation: none;
+    }
   }
 
   [data-slot="session-review-accordion-content"] {

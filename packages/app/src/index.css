@@ -170,4 +170,18 @@
       opacity: 1;
     }
   }
+
+  /* /goal mode: inset the stitched border rects ~2px so the 2px stroke stays inside the
+     dock shell's clipped, rounded (12px) box. Both the stitched base and the moving
+     highlight ("comet") share geometry so they overlay exactly. Geometry uses SVG2 CSS
+     props so we can size with calc() instead of measuring the shell in JS. */
+  [data-component="goal-rainbow-border"] [data-slot="goal-rainbow-rect"],
+  [data-component="goal-rainbow-border"] [data-slot="goal-rainbow-comet"] {
+    x: 2px;
+    y: 2px;
+    width: calc(100% - 4px);
+    height: calc(100% - 4px);
+    rx: 10px;
+    ry: 10px;
+  }
 }

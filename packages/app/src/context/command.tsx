@@ -79,6 +79,9 @@ export interface CommandOption {
   category?: string
   keybind?: KeybindConfig
   slash?: string
+  // When true, picking the slash entry prefills `/<slash> ` into the editor (so the
+  // user can type an argument) instead of running the command immediately.
+  slashArgs?: boolean
   suggested?: boolean
   disabled?: boolean
   hidden?: boolean

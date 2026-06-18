@@ -1,4 +1,4 @@
-import { Show, createEffect, createMemo, onCleanup } from "solid-js"
+import { Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useNavigate, useSearchParams } from "@solidjs/router"
 import { useSpring } from "@opencode-ai/ui/motion-spring"
@@ -7,6 +7,7 @@ import { PromptInput } from "@/components/prompt-input"
 import { useLanguage } from "@/context/language"
 import { usePrompt } from "@/context/prompt"
 import { useSync } from "@/context/sync"
+import { showToast } from "@/utils/toast"
 import { getSessionHandoff, setSessionHandoff } from "@/pages/session/handoff"
 import { useSessionKey } from "@/pages/session/session-layout"
 import { SessionPermissionDock } from "@/pages/session/composer/session-permission-dock"
@@ -16,6 +17,7 @@ import { SessionRevertDock } from "@/pages/session/composer/session-revert-dock"
 import type { SessionComposerState } from "@/pages/session/composer/session-composer-state"
 import { SessionTodoDock } from "@/pages/session/composer/session-todo-dock"
 import type { FollowupDraft } from "@/components/prompt-input/submit"
+import type { GoalBorderState } from "@/components/prompt-input/goal-rainbow-border"
 import { createResizeObserver } from "@solid-primitives/resize-observer"
 import { NEW_SESSION_CONTENT_WIDTH } from "@/pages/session/new-session-layout"
 import { createQuery } from "@tanstack/solid-query"
@@ -58,6 +60,9 @@ export function SessionComposerRegion(props: {
     onRestore: (id: string) => void
   }
   setPromptDockRef: (el: HTMLDivElement) => void
+  // When a side panel is open, the chat column settles to this content width (px).
+  // null/undefined means no panel — the dock just fills its column.
+  dockNarrowWidth?: number | null
 }) {
   const navigate = useNavigate()
   const layout = useLayout()
@@ -75,6 +80,24 @@ export function SessionComposerRegion(props: {
   const pickDirectory = useDirectoryPicker()
   const [search] = useSearchParams<{ draftId?: string }>()
   const view = layout.view(route.sessionKey)
+
+  // Flash the goal border green for a few seconds when a goal is achieved, then let it
+  // fade out. Only flash on a genuine active→achieved transition (not when revisiting a
+  // session whose goal was already achieved).
+  const [goalAchievedFlash, setGoalAchievedFlash] = createSignal(false)
+  let goalFlashTimer: ReturnType<typeof setTimeout> | undefined
+  let prevGoalStatus: string | undefined
+  createEffect(() => {
+    const status = view.goal.state()?.status
+    if (status === "achieved" && prevGoalStatus === "active") {
+      setGoalAchievedFlash(true)
+      clearTimeout(goalFlashTimer)
+      goalFlashTimer = setTimeout(() => setGoalAchievedFlash(false), 4000)
+    }
+    if (status !== "achieved") setGoalAchievedFlash(false)
+    prevGoalStatus = status
+  })
+  onCleanup(() => clearTimeout(goalFlashTimer))
 
   const agentsQuery = createQuery(() => queryOptions().agents(pathKey(sdk().directory)))
   const globalProvidersQuery = createQuery(() => queryOptions().providers(null))
@@ -123,6 +146,47 @@ export function SessionComposerRegion(props: {
       id: route.params.id,
       tabs: layout.tabs(route.sessionKey),
       reviewPanel: view.reviewPanel,
+      goal: {
+        active: view.goal.active,
+        display: (): GoalBorderState | undefined => {
+          const goal = view.goal.state()
+          if (!goal) return undefined
+          if (goal.status === "active") {
+            if (goal.error) return "error"
+            if (goal.paused) return "paused"
+            return "active"
+          }
+          if (goal.status === "achieved" && goalAchievedFlash()) return "done"
+          return undefined
+        },
+        set: (condition: string) => view.goal.set(condition),
+        clear: view.goal.clear,
+        status: () => {
+          const goal = view.goal.state()
+          if (!goal) {
+            showToast({ title: "No active goal", description: "Type /goal <condition> to set one." })
+            return
+          }
+          const seconds = Math.round((Date.now() - goal.startedAt) / 1000)
+          const label =
+            goal.summary ?? (goal.condition.length > 64 ? `${goal.condition.slice(0, 64).trimEnd()}…` : goal.condition)
+          const title =
+            goal.status === "achieved"
+              ? "◎ Goal achieved"
+              : goal.error
+                ? "◎ Goal errored"
+                : goal.paused
+                  ? "◎ Goal paused"
+                  : "◎ Goal active"
+          const note = goal.error ?? goal.lastReason
+          showToast({
+            title,
+            description: `${label}\n${goal.turns} turn${goal.turns === 1 ? "" : "s"} • ${seconds}s${
+              note ? `\nLast check: ${note}` : ""
+            }`,
+          })
+        },
+      },
     },
     newLayoutDesigns: settings.general.newLayoutDesigns(),
   }))
@@ -211,9 +275,33 @@ export function SessionComposerRegion(props: {
     update()
   })
 
+  // Make the input bar move in real time as the side panel opens/closes, without
+  // animating the chat column's width (which would re-measure the virtualized
+  // timeline every frame). The column width snaps once per toggle; we spring the
+  // dock's effective width and reserve the difference as right padding, so the
+  // input bar shrinks/grows smoothly and the column snap is absorbed by the
+  // padding (dockWidth and reserve jump together, leaving the bar continuous).
+  const [dockWidth, setDockWidth] = createSignal(0)
+  let dockOuter: HTMLDivElement | undefined
+  createEffect(() => {
+    const el = dockOuter
+    if (!el) return
+    const update = () => setDockWidth(el.getBoundingClientRect().width)
+    createResizeObserver(el, update)
+    update()
+  })
+  const dockTarget = createMemo(() => props.dockNarrowWidth ?? dockWidth())
+  // Slightly faster than the panel's 240ms slide so the bar's right edge leads
+  // the panel's left edge and never gets clipped by it.
+  const dockSpring = useSpring(dockTarget, { visualDuration: 0.17, bounce: 0 })
+  const dockReserve = createMemo(() => (dockWidth() ? Math.max(0, dockWidth() - dockSpring()) : 0))
+
   return (
     <div
-      ref={props.setPromptDockRef}
+      ref={(el) => {
+        props.setPromptDockRef(el)
+        dockOuter = el
+      }}
       data-component="session-prompt-dock"
       classList={{
         "w-full flex flex-col justify-center items-center pointer-events-none": true,
@@ -227,6 +315,11 @@ export function SessionComposerRegion(props: {
           [NEW_SESSION_CONTENT_WIDTH]: props.placement === "inline",
           "md:max-w-200 md:mx-auto 2xl:max-w-[1000px]": props.centered,
         }}
+        style={
+          props.placement !== "inline" && dockReserve() > 0
+            ? { "padding-right": `${12 + dockReserve()}px` }
+            : undefined
+        }
       >
         <Show when={props.state.questionRequest()} keyed>
           {(request) => (

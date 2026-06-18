@@ -56,12 +56,39 @@ type SessionTabs = {
   all: string[]
 }
 
+// `/goal`: a session-scoped completion condition the agent keeps working toward,
+// re-evaluated after every turn by a fresh model until met (or cleared).
+export type SessionGoal = {
+  condition: string
+  // A short model-generated title (a few words) for display — the raw condition can be
+  // huge (e.g. a whole system prompt), so we never show it verbatim in the UI.
+  summary?: string
+  startedAt: number
+  turns: number
+  lastReason?: string
+  // Hidden child session used to run the per-turn evaluator (keeps the main
+  // transcript clean). Created lazily on the first evaluation.
+  evalSessionID?: string
+  status: "active" | "achieved"
+  // Soft, recoverable failure of the loop itself (not a goal verdict): set when the
+  // evaluator's verdict couldn't be read or timed out (`paused`), or a call threw
+  // (`error`). Kept separate from `status` so the active/achieved gates stay unchanged;
+  // the next turn clears them and re-evaluates.
+  paused?: boolean
+  error?: string
+}
+
+// The raw condition can be a whole system prompt; it's re-sent on every continuation and
+// evaluation, so clamp it to keep the payload bounded. The summary protects the display.
+export const GOAL_CONDITION_MAX = 4_000
+
 type SessionView = {
   scroll: Record<string, SessionScroll>
   reviewOpen?: string[]
   pendingMessage?: string
   pendingMessageAt?: number
   todoCollapsed?: boolean
+  goal?: SessionGoal
 }
 
 type TabHandoff = {
@@ -794,6 +821,33 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
               } else {
                 setStore("sessionView", session, "todoCollapsed", collapsed)
               }
+            },
+          },
+          goal: {
+            state: () => s().goal,
+            active: () => s().goal?.status === "active",
+            set(condition: string) {
+              const session = key()
+              const next: SessionGoal = {
+                condition: condition.slice(0, GOAL_CONDITION_MAX),
+                startedAt: Date.now(),
+                turns: 0,
+                status: "active",
+              }
+              const current = store.sessionView[session]
+              if (!current) setStore("sessionView", session, { scroll: {}, goal: next })
+              else setStore("sessionView", session, "goal", next)
+            },
+            update(patch: Partial<SessionGoal>) {
+              const session = key()
+              const current = store.sessionView[session]?.goal
+              if (!current) return
+              setStore("sessionView", session, "goal", { ...current, ...patch })
+            },
+            clear() {
+              const session = key()
+              if (!store.sessionView[session]?.goal) return
+              setStore("sessionView", session, "goal", undefined)
             },
           },
           terminal: {

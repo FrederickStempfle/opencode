@@ -1,8 +1,10 @@
-import { For, Match, Show, Switch, createEffect, createMemo, onCleanup, type JSX } from "solid-js"
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js"
 import { createStore } from "solid-js/store"
 import { createMediaQuery } from "@solid-primitives/media"
 import { Tabs } from "@opencode-ai/ui/tabs"
 import { IconButton } from "@opencode-ai/ui/icon-button"
+import { DropdownMenu } from "@opencode-ai/ui/dropdown-menu"
+import { Icon } from "@opencode-ai/ui/icon"
 import { TooltipKeybind } from "@opencode-ai/ui/tooltip"
 import { ResizeHandle } from "@opencode-ai/ui/resize-handle"
 import { Mark } from "@opencode-ai/ui/logo"
@@ -20,18 +22,24 @@ import { useFile, type SelectedLineRange } from "@/context/file"
 import { useLanguage } from "@/context/language"
 import { useLayout } from "@/context/layout"
 import { useSettings } from "@/context/settings"
+import { useTerminal } from "@/context/terminal"
 import { useSync } from "@/context/sync"
 import { createFileTabListSync } from "@/pages/session/file-tab-scroll"
 import { FileTabContent } from "@/pages/session/file-tabs"
 import {
+  createDelayedTrue,
   createOpenSessionFileTab,
   createSessionTabs,
+  createStickyOpen,
   getTabReorderIndex,
+  PANEL_ANIMATION_MS,
   shouldShowFileTree,
   type Sizing,
 } from "@/pages/session/helpers"
 import { setSessionHandoff } from "@/pages/session/handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
+import { terminalTabLabel } from "@/pages/session/terminal-label"
+import { TerminalView } from "@/pages/session/terminal-view"
 
 type RenderDiff = (SnapshotFileDiff & { file: string }) | VcsFileDiff
 
@@ -49,11 +57,11 @@ export function SessionSidePanel(props: {
   reviewPanel: () => JSX.Element
   activeDiff?: string
   focusReviewDiff: (path: string) => void
-  reviewSnap: boolean
   size: Sizing
 }) {
   const layout = useLayout()
   const settings = useSettings()
+  const terminal = useTerminal()
   const sync = useSync()
   const file = useFile()
   const language = useLanguage()
@@ -75,12 +83,50 @@ export function SessionSidePanel(props: {
   )
   const open = createMemo(() => reviewOpen() || fileOpen())
   const reviewTab = createMemo(() => isDesktop())
-  const panelWidth = createMemo(() => {
-    if (!open()) return "0px"
-    if (reviewOpen()) return "auto"
-    return `${layout.fileTree.width()}px`
+
+  // `open` flips immediately and drives the GPU transform/opacity slide.
+  // The "expanded" stickies keep the absolute panel mounted and sized until the
+  // content has slid out, so the chat column's width snaps once per toggle
+  // instead of reflowing the message timeline on every animation frame.
+  const reviewExpanded = createStickyOpen(reviewOpen, PANEL_ANIMATION_MS)
+  const fileExpanded = createStickyOpen(fileOpen, PANEL_ANIMATION_MS)
+  const expanded = createMemo(() => reviewExpanded() || fileExpanded())
+  // `settled` is true only while the panel sits fully open and still. Then it's a
+  // normal in-flow flex item (flush, like the original); during the open/close
+  // slide it becomes an absolute overlay so it can move without reserving a slot.
+  const settled = createDelayedTrue(open, PANEL_ANIMATION_MS)
+
+  // Drives the slide direction. On open the content mounts off-screen, then this
+  // flips `true` after the closed state has painted (double rAF) so the transition
+  // animates in. On close it flips `false` immediately to slide back out.
+  const [slideIn, setSlideIn] = createSignal(false)
+  createEffect(() => {
+    if (!open()) {
+      setSlideIn(false)
+      return
+    }
+    let inner = 0
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => setSlideIn(true))
+    })
+    onCleanup(() => {
+      cancelAnimationFrame(outer)
+      if (inner) cancelAnimationFrame(inner)
+    })
   })
-  const treeWidth = createMemo(() => (fileOpen() ? `${layout.fileTree.width()}px` : "0px"))
+  // When settled and in-flow, review mode is sized by flex-1 (width auto). While
+  // animating it's an absolute overlay, so it needs an explicit width: the slice
+  // to the right of the chat column. In the new layout that subtracts the row's
+  // left padding, the card gap, and the right padding (3 × 0.5rem) so the overlay
+  // lines up exactly with the in-flow card. The file tree uses its fixed width.
+  const panelWidth = createMemo(() => {
+    if (fileExpanded()) return `${layout.fileTree.width()}px`
+    if (!reviewExpanded()) return "0px"
+    if (settled()) return "auto"
+    const inset = settings.general.newLayoutDesigns() ? " - 1.5rem" : ""
+    return `calc(100% - ${layout.session.width()}px${inset})`
+  })
+  const treeWidth = createMemo(() => (fileExpanded() ? `${layout.fileTree.width()}px` : "0px"))
 
   const diffs = createMemo(() => props.diffs().filter(renderDiff))
   const diffFiles = createMemo(() => diffs().map((d) => d.file))
@@ -134,6 +180,26 @@ export function SessionSidePanel(props: {
     if (!view().reviewPanel.opened()) view().reviewPanel.open()
   }
 
+  const terminalFocused = createMemo(() => view().terminal.opened())
+
+  const addTerminal = () => {
+    terminal.new()
+    openReviewPanel()
+    view().terminal.open()
+  }
+
+  const selectTerminal = (id: string) => {
+    terminal.open(id)
+    openReviewPanel()
+    if (!view().terminal.opened()) view().terminal.open()
+  }
+
+  const newDiff = () => {
+    void import("@/components/dialog-select-file").then((x) => {
+      dialog.show(() => <x.DialogSelectFile mode="files" onOpenFile={showAllFiles} />)
+    })
+  }
+
   const openTab = createOpenSessionFileTab({
     normalizeTab,
     openTab: tabs().open,
@@ -154,6 +220,49 @@ export function SessionSidePanel(props: {
   const openedTabs = tabState.openedTabs
   const activeTab = tabState.activeTab
   const activeFileTab = tabState.activeFileTab
+
+  const terminalTab = (id: string) => `terminal:${id}`
+
+  const activeView = createMemo(() => {
+    const active = terminal.active()
+    if (terminalFocused() && active) return terminalTab(active)
+    return activeTab()
+  })
+
+  const selectTab = (value: string) => {
+    if (value.startsWith("terminal:")) {
+      selectTerminal(value.slice("terminal:".length))
+      return
+    }
+    if (view().terminal.opened()) view().terminal.close()
+    openTab(value)
+  }
+
+  // surface the review panel whenever the terminal becomes the active view
+  createEffect(
+    on(terminalFocused, (open, prev) => {
+      if (open && !prev) openReviewPanel()
+    }),
+  )
+
+  // create a terminal when the panel is focused with none open
+  createEffect(() => {
+    if (!terminalFocused()) return
+    if (!terminal.ready()) return
+    if (terminal.all().length > 0) return
+    terminal.new()
+  })
+
+  // drop terminal focus once the last terminal closes
+  createEffect(
+    on(
+      () => terminal.all().length,
+      (count, prev) => {
+        if (prev === undefined || prev <= 0 || count !== 0) return
+        if (view().terminal.opened()) view().terminal.close()
+      },
+    ),
+  )
 
   const fileTreeTab = () => layout.fileTree.tab()
 
@@ -219,17 +328,26 @@ export function SessionSidePanel(props: {
         aria-label={language.t("session.panel.reviewAndFiles")}
         aria-hidden={!open()}
         inert={!open()}
-        class="relative min-w-0 h-full flex shrink-0 overflow-hidden bg-background-base"
+        class="min-w-0 flex overflow-hidden bg-background-base [backface-visibility:hidden]"
         classList={{
+          // settled → normal flush flex item; animating → absolute overlay so it
+          // can slide without leaving a reserved (black) slot behind. The overlay
+          // insets match the row's p-2 padding so it lines up with the in-flow card.
+          "relative h-full shrink-0": settled(),
+          "flex-1": settled() && reviewExpanded(),
+          "absolute z-20": !settled(),
+          "inset-y-0 right-0": !settled() && !settings.general.newLayoutDesigns(),
+          "inset-y-2 right-2": !settled() && settings.general.newLayoutDesigns(),
           "pointer-events-none": !open(),
-          "transition-[width] duration-[240ms] ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[width] motion-reduce:transition-none":
-            !props.size.active() && !props.reviewSnap,
           "rounded-[10px] shadow-[var(--v2-elevation-raised)] overflow-hidden": settings.general.newLayoutDesigns(),
-          "flex-1": reviewOpen(),
+          "transition-[translate] duration-[240ms] ease-[cubic-bezier(0.32,0.72,0,1)] will-change-[translate] motion-reduce:transition-none":
+            !props.size.active() && !settled(),
+          "translate-x-full": !slideIn(),
+          "translate-x-0": slideIn(),
         }}
         style={{ width: panelWidth() }}
       >
-        <Show when={open()}>
+        <Show when={expanded()}>
           <div
             class="size-full flex"
             classList={{
@@ -253,7 +371,7 @@ export function SessionSidePanel(props: {
                 >
                   <DragDropSensors />
                   <ConstrainDragYAxis />
-                  <Tabs value={activeTab()} onChange={openTab}>
+                  <Tabs value={activeView()} onChange={selectTab}>
                     <div class="sticky top-0 shrink-0 flex">
                       <Tabs.List
                         ref={(el: HTMLDivElement) => {
@@ -271,6 +389,35 @@ export function SessionSidePanel(props: {
                             </div>
                           </Tabs.Trigger>
                         </Show>
+                        <For each={terminal.all()}>
+                          {(pty) => (
+                            <Tabs.Trigger
+                              value={terminalTab(pty.id)}
+                              closeButton={
+                                <IconButton
+                                  icon="close-small"
+                                  variant="ghost"
+                                  class="h-5 w-5"
+                                  onClick={() => terminal.close(pty.id)}
+                                  aria-label={language.t("common.closeTab")}
+                                />
+                              }
+                              hideCloseButton
+                              onMiddleClick={() => terminal.close(pty.id)}
+                            >
+                              <div>
+                                {terminalTabLabel({
+                                  title: pty.title,
+                                  titleNumber: pty.titleNumber,
+                                  t: language.t as (
+                                    key: string,
+                                    vars?: Record<string, string | number | boolean>,
+                                  ) => string,
+                                })}
+                              </div>
+                            </Tabs.Trigger>
+                          )}
+                        </For>
                         <Show when={contextOpen()}>
                           <Tabs.Trigger
                             value="context"
@@ -303,24 +450,32 @@ export function SessionSidePanel(props: {
                           <For each={openedTabs()}>{(tab) => <SortableTab tab={tab} onTabClose={tabs().close} />}</For>
                         </SortableProvider>
                         <div class="bg-background-stronger h-full shrink-0 sticky right-0 z-10 flex items-center justify-center pr-3">
-                          <TooltipKeybind
-                            title={language.t("command.file.open")}
-                            keybind={command.keybind("file.open")}
-                            class="flex items-center"
-                          >
-                            <IconButton
+                          <DropdownMenu gutter={4} placement="bottom-end">
+                            <DropdownMenu.Trigger
+                              as={IconButton}
                               icon="plus-small"
                               variant="ghost"
                               iconSize="large"
                               class="!rounded-md"
-                              onClick={() => {
-                                void import("@/components/dialog-select-file").then((x) => {
-                                  dialog.show(() => <x.DialogSelectFile mode="files" onOpenFile={showAllFiles} />)
-                                })
-                              }}
-                              aria-label={language.t("command.file.open")}
+                              aria-label={language.t("session.panel.add")}
                             />
-                          </TooltipKeybind>
+                            <DropdownMenu.Portal>
+                              <DropdownMenu.Content>
+                                <DropdownMenu.Item onSelect={addTerminal}>
+                                  <Icon name="terminal-active" class="size-4" />
+                                  <span data-slot="dropdown-menu-item-label">
+                                    {language.t("session.panel.addTerminal")}
+                                  </span>
+                                </DropdownMenu.Item>
+                                <DropdownMenu.Item onSelect={newDiff}>
+                                  <Icon name="plus-small" class="size-4" />
+                                  <span data-slot="dropdown-menu-item-label">
+                                    {language.t("session.panel.newDiff")}
+                                  </span>
+                                </DropdownMenu.Item>
+                              </DropdownMenu.Content>
+                            </DropdownMenu.Portal>
+                          </DropdownMenu>
                         </div>
                       </Tabs.List>
                     </div>
@@ -330,6 +485,19 @@ export function SessionSidePanel(props: {
                         <Show when={reviewOpen() && activeTab() === "review"}>{props.reviewPanel()}</Show>
                       </Tabs.Content>
                     </Show>
+
+                    <For each={terminal.all()}>
+                      {(pty) => (
+                        <Tabs.Content
+                          value={terminalTab(pty.id)}
+                          class="flex flex-col h-full overflow-hidden contain-strict"
+                        >
+                          <Show when={activeView() === terminalTab(pty.id)}>
+                            <TerminalView pty={pty} active={() => activeView() === terminalTab(pty.id)} />
+                          </Show>
+                        </Tabs.Content>
+                      )}
+                    </For>
 
                     <Tabs.Content value="empty" class="flex flex-col h-full overflow-hidden contain-strict">
                       <Show when={activeTab() === "empty"}>
@@ -382,8 +550,10 @@ export function SessionSidePanel(props: {
                 class="relative min-w-0 h-full shrink-0 overflow-hidden"
                 classList={{
                   "pointer-events-none": !fileOpen(),
+                  // Only animate width for the in-review sub-column reveal; when the
+                  // file tree is the whole panel, the outer transform slide handles it.
                   "transition-[width] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[width] motion-reduce:transition-none":
-                    !props.size.active(),
+                    !props.size.active() && reviewOpen(),
                 }}
                 style={{ width: treeWidth() }}
               >

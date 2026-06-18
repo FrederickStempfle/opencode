@@ -13,7 +13,7 @@ import { useFileComponent } from "../context/file"
 import { useI18n } from "../context/i18n"
 import { getDirectory, getFilename } from "@opencode-ai/core/util/path"
 import { checksum } from "@opencode-ai/core/util/encode"
-import { createEffect, createMemo, For, Match, onCleanup, Show, Switch, untrack, type JSX } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack, type JSX } from "solid-js"
 import { createStore } from "solid-js/store"
 import { type FileContent, type SnapshotFileDiff, type VcsFileDiff } from "@opencode-ai/sdk/v2"
 import { PreloadMultiFileDiffResult } from "@pierre/diffs/ssr"
@@ -396,7 +396,18 @@ export const SessionReview = (props: SessionReviewProps) => {
                     const diffCanRender = () => diff().additions !== 0 || diff().deletions !== 0
 
                     const expanded = createMemo(() => open().includes(file))
-                    const mounted = createMemo(() => expanded() && (!!store.visible[file] || pinned(file)))
+                    // Keep the diff rendered through the collapse animation so it
+                    // shrinks away with the row instead of vanishing instantly.
+                    const [live, setLive] = createSignal(untrack(expanded))
+                    createEffect(() => {
+                      if (expanded()) {
+                        setLive(true)
+                        return
+                      }
+                      const timer = setTimeout(() => setLive(false), 240)
+                      onCleanup(() => clearTimeout(timer))
+                    })
+                    const mounted = createMemo(() => live() && (!!store.visible[file] || pinned(file)))
                     const force = () => !!store.force[file]
 
                     const comments = createMemo(() => grouped().get(file) ?? [])
@@ -408,7 +419,7 @@ export const SessionReview = (props: SessionReviewProps) => {
                     const mediaKind = createMemo(() => mediaKindFromPath(file))
 
                     const tooLarge = createMemo(() => {
-                      if (!expanded()) return false
+                      if (!live()) return false
                       if (force()) return false
                       if (mediaKind()) return false
                       return changedLines() > MAX_DIFF_CHANGED_LINES
@@ -578,7 +589,7 @@ export const SessionReview = (props: SessionReviewProps) => {
                               queue()
                             }}
                           >
-                            <Show when={expanded()}>
+                            <Show when={live()}>
                               <Switch>
                                 <Match when={!mounted() && !tooLarge()}>
                                   <div

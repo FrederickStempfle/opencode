@@ -45,21 +45,23 @@ import { useTerminal } from "@/context/terminal"
 import { type FollowupDraft, sendFollowupDraft } from "@/components/prompt-input/submit"
 import { createSessionComposerState, SessionComposerRegion } from "@/pages/session/composer"
 import {
+  createDelayedTrue,
   createOpenReviewFile,
   createSessionTabs,
   createSizing,
   focusTerminalById,
+  PANEL_ANIMATION_MS,
   shouldFocusTerminalOnKeyDown,
   shouldShowFileTree,
 } from "@/pages/session/helpers"
 import { MessageTimeline } from "@/pages/session/timeline/message-timeline"
+import { createGoalRunner } from "@/pages/session/goal-runner"
 import { createTimelineModel } from "@/pages/session/timeline/model"
 import { type DiffStyle, SessionReviewTab, type SessionReviewTabProps } from "@/pages/session/review-tab"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { useServer } from "@/context/server"
 import { syncSessionModel } from "@/pages/session/session-model-helpers"
 import { SessionSidePanel } from "@/pages/session/session-side-panel"
-import { TerminalPanel } from "@/pages/session/terminal-panel"
 import { useSessionCommands } from "@/pages/session/use-session-commands"
 import { useSessionHashScroll } from "@/pages/session/use-session-hash-scroll"
 import { Identifier } from "@/utils/id"
@@ -111,7 +113,6 @@ export default function Page() {
 
   const [ui, setUi] = createStore({
     pendingMessage: undefined as string | undefined,
-    reviewSnap: false,
     scrollGesture: 0,
     scroll: {
       overflow: false,
@@ -121,6 +122,26 @@ export default function Page() {
   })
 
   const composer = createSessionComposerState()
+
+  createGoalRunner({
+    sessionID: () => params.id,
+    busy: (id) => sync().data.session_working(id),
+    blocked: () => composer.blocked(),
+    goalState: () => view().goal.state(),
+    updateGoal: (patch) => view().goal.update(patch),
+    optimisticBusy: (id, busy) => {
+      const [, setStore] = serverSync().child(sdk().directory, { bootstrap: false })
+      setStore("session_status", id, { type: busy ? "busy" : "idle" })
+    },
+    messagesFor: (id) => sync().data.message[id] ?? [],
+    partsFor: (messageID) => sync().data.part[messageID] ?? [],
+    model: () => {
+      const model = local.model.current()
+      return model ? { providerID: model.provider.id, modelID: model.id } : undefined
+    },
+    agent: () => local.agent.current()?.name,
+    sdk,
+  })
 
   const workspaceTabs = createMemo(() => layout.tabs(workspaceKey))
 
@@ -172,11 +193,17 @@ export default function Page() {
         opened: layout.fileTree.opened(),
       }),
   )
-  const desktopSidePanelOpen = createMemo(() => desktopReviewOpen() || desktopFileTreeOpen())
+  // The chat keeps its full width while the panel slides in over it (so no empty
+  // black slot is ever exposed) and only gives the width up once the panel has
+  // settled; on close it reclaims the width the instant the close begins. This
+  // snaps the chat width a single time per toggle — masked behind the panel —
+  // instead of re-measuring the virtualized timeline every frame.
+  const reviewSettled = createDelayedTrue(desktopReviewOpen, PANEL_ANIMATION_MS)
+  const fileTreeSettled = createDelayedTrue(desktopFileTreeOpen, PANEL_ANIMATION_MS)
   const sessionPanelWidth = createMemo(() => {
-    if (!desktopSidePanelOpen()) return "100%"
-    if (desktopReviewOpen()) return `${layout.session.width()}px`
-    return `calc(100% - ${layout.fileTree.width()}px)`
+    if (reviewSettled()) return `${layout.session.width()}px`
+    if (fileTreeSettled()) return `calc(100% - ${layout.fileTree.width()}px)`
+    return "100%"
   })
   const centered = createMemo(() => isDesktop() && !desktopReviewOpen())
 
@@ -291,24 +318,10 @@ export default function Page() {
     return key
   }, sessionKey())
 
-  let reviewFrame: number | undefined
   let todoFrame: number | undefined
   let todoTimer: number | undefined
   let diffFrame: number | undefined
   let diffTimer: number | undefined
-
-  createComputed((prev) => {
-    const open = desktopReviewOpen()
-    if (prev === undefined || prev === open) return open
-
-    if (reviewFrame !== undefined) cancelAnimationFrame(reviewFrame)
-    setUi("reviewSnap", true)
-    reviewFrame = requestAnimationFrame(() => {
-      reviewFrame = undefined
-      setUi("reviewSnap", false)
-    })
-    return open
-  }, desktopReviewOpen())
 
   const turnDiffs = createMemo(() => list(lastUserMessage()?.summary?.diffs))
   const nogit = createMemo(() => {
@@ -1506,7 +1519,6 @@ export default function Page() {
   })
 
   onCleanup(() => {
-    if (reviewFrame !== undefined) cancelAnimationFrame(reviewFrame)
     if (todoFrame !== undefined) cancelAnimationFrame(todoFrame)
     if (todoTimer !== undefined) window.clearTimeout(todoTimer)
     if (diffFrame !== undefined) cancelAnimationFrame(diffFrame)
@@ -1522,6 +1534,7 @@ export default function Page() {
       state={composer}
       ready={!store.deferRender && messagesReady()}
       centered={placement === "dock" && centered()}
+      dockNarrowWidth={placement === "dock" && desktopReviewOpen() ? layout.session.width() : null}
       placement={placement}
       inputRef={(el) => {
         inputRef = el
@@ -1575,7 +1588,7 @@ export default function Page() {
       {sessionSync() ?? ""}
       <SessionHeader />
       <div
-        class="flex-1 min-h-0 flex flex-col md:flex-row "
+        class="relative flex-1 min-h-0 flex flex-col md:flex-row "
         classList={{
           "gap-2 p-2": settings.general.newLayoutDesigns(),
         }}
@@ -1606,11 +1619,7 @@ export default function Page() {
         </Show>
 
         <div
-          classList={{
-            "@container relative shrink-0 flex flex-col min-h-0 h-full flex-1 md:flex-none transition-[width]": true,
-            "duration-[240ms] ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[width] motion-reduce:transition-none":
-              !size.active() && !ui.reviewSnap,
-          }}
+          class="@container relative shrink-0 flex flex-col min-h-0 h-full flex-1 md:flex-none"
           style={{
             width: sessionPanelWidth(),
           }}
@@ -1690,7 +1699,11 @@ export default function Page() {
           </div>
 
           <Show when={desktopReviewOpen()}>
-            <div onPointerDown={() => size.start()}>
+            <div
+              class="relative z-30 transition-opacity duration-[240ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+              classList={{ "opacity-0": !reviewSettled(), "opacity-100": reviewSettled() }}
+              onPointerDown={() => size.start()}
+            >
               <ResizeHandle
                 classList={{
                   "-right-1": settings.general.newLayoutDesigns(),
@@ -1718,12 +1731,9 @@ export default function Page() {
           reviewPanel={reviewPanel}
           activeDiff={tree.activeDiff}
           focusReviewDiff={focusReviewDiff}
-          reviewSnap={ui.reviewSnap}
           size={size}
         />
       </div>
-
-      <TerminalPanel />
     </div>
   )
 }

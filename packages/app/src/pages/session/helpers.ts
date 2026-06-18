@@ -1,4 +1,4 @@
-import { batch, createMemo, onCleanup, onMount, type Accessor } from "solid-js"
+import { batch, createEffect, createMemo, createSignal, onCleanup, onMount, type Accessor } from "solid-js"
 import { createStore } from "solid-js/store"
 import { makeEventListener } from "@solid-primitives/event-listener"
 import { same } from "@/utils/same"
@@ -196,3 +196,68 @@ export const createSizing = () => {
 }
 
 export type Sizing = ReturnType<typeof createSizing>
+
+// Duration of the side-panel open/close animation. Kept in sync with the
+// `duration-[240ms]` Tailwind classes that drive the transform/opacity transition.
+export const PANEL_ANIMATION_MS = 240
+
+// Mirrors `source` but defers the flip to `false` by `ms`, so layout can stay
+// expanded while a closing animation plays. Used to keep the panel's box sized
+// (and the chat column narrow) until the content has finished sliding out, which
+// lets us animate `transform` instead of `width` and avoid per-frame reflows.
+export const createStickyOpen = (source: Accessor<boolean>, ms: number): Accessor<boolean> => {
+  const [open, setOpen] = createSignal(source())
+  let timer: number | undefined
+
+  createEffect(() => {
+    if (source()) {
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        timer = undefined
+      }
+      setOpen(true)
+      return
+    }
+    if (timer !== undefined) clearTimeout(timer)
+    timer = window.setTimeout(() => {
+      timer = undefined
+      setOpen(false)
+    }, ms)
+  })
+
+  onCleanup(() => {
+    if (timer !== undefined) clearTimeout(timer)
+  })
+
+  return open
+}
+
+// Mirrors `source` but defers the flip to `true` by `ms` (flips to `false`
+// immediately). Used to narrow the chat column only once the side panel has
+// finished sliding in, and to widen it again the instant a close begins.
+export const createDelayedTrue = (source: Accessor<boolean>, ms: number): Accessor<boolean> => {
+  const [on, setOn] = createSignal(source())
+  let timer: number | undefined
+
+  createEffect(() => {
+    if (!source()) {
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        timer = undefined
+      }
+      setOn(false)
+      return
+    }
+    if (timer !== undefined) clearTimeout(timer)
+    timer = window.setTimeout(() => {
+      timer = undefined
+      setOn(true)
+    }, ms)
+  })
+
+  onCleanup(() => {
+    if (timer !== undefined) clearTimeout(timer)
+  })
+
+  return on
+}

@@ -463,6 +463,25 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
       keybind: "mod+shift+r",
       onSelect: () => view().reviewPanel.toggle(),
     }),
+    viewCommand({
+      id: "goal.toggle",
+      title: language.t("command.goal.toggle"),
+      description: language.t("command.goal.toggle.description"),
+      slash: "goal",
+      // Picking `/goal` prefills `/goal ` so the user can type the condition; submitting
+      // it pins the goal and starts working (see createPromptSubmit). From the palette
+      // with no condition to type, it clears an active goal or hints how to set one.
+      slashArgs: true,
+      disabled: !params.id,
+      onSelect: () => {
+        if (view().goal.active()) {
+          view().goal.clear()
+          showToast({ title: "◎ Goal cleared" })
+          return
+        }
+        showToast({ title: "Set a goal", description: "Type /goal <condition> in the composer." })
+      },
+    }),
     ...(shown()
       ? [
           viewCommand({

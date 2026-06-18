@@ -51,6 +51,11 @@ type FollowupSendInput = {
 
 const draftText = (prompt: Prompt) => prompt.map((part) => ("content" in part ? part.content : "")).join("")
 
+// Leading `/goal` token (plus following spaces/tabs) to strip from a goal submission.
+const GOAL_PREFIX = /^\s*\/goal\b[ \t]*/i
+// Words that drop the active goal when passed as `/goal <word>`.
+const GOAL_CLEAR_WORDS = new Set(["clear", "stop", "off", "reset", "none", "cancel"])
+
 const draftImages = (prompt: Prompt) => prompt.filter((part): part is ImageAttachmentPart => part.type === "image")
 
 export async function sendFollowupDraft(input: FollowupSendInput) {
@@ -194,6 +199,11 @@ type PromptSubmitInput = {
   onQueue?: (draft: FollowupDraft) => void
   onAbort?: () => void
   onSubmit?: () => void
+  goal?: {
+    set: (condition: string) => void
+    clear: () => void
+    status: () => void
+  }
 }
 
 type CommentItem = {
@@ -298,14 +308,40 @@ export function createPromptSubmit(input: PromptSubmitInput) {
   const handleSubmit = async (event: Event) => {
     event.preventDefault()
 
-    const currentPrompt = prompt.current()
-    const text = currentPrompt.map((part) => ("content" in part ? part.content : "")).join("")
+    let currentPrompt = prompt.current()
+    let text = currentPrompt.map((part) => ("content" in part ? part.content : "")).join("")
     const images = input.imageAttachments().slice()
     const mode = input.mode()
 
     if (text.trim().length === 0 && images.length === 0 && input.commentCount() === 0) {
       if (input.working()) void abort()
       return
+    }
+
+    // `/goal <condition>`: pin a completion condition for this session and send it as
+    // the directive — the goal runner then keeps working until an evaluator judges it
+    // met. Bare `/goal` reports status; `/goal clear` (and aliases) drops the goal.
+    if (mode === "normal" && GOAL_PREFIX.test(text)) {
+      const arg = text.replace(GOAL_PREFIX, "").trim()
+      if (!arg) {
+        input.goal?.status()
+        prompt.reset()
+        input.setMode("normal")
+        input.setPopover(null)
+        return
+      }
+      if (GOAL_CLEAR_WORDS.has(arg.toLowerCase())) {
+        input.goal?.clear()
+        prompt.reset()
+        input.setMode("normal")
+        input.setPopover(null)
+        return
+      }
+      input.goal?.set(arg)
+      currentPrompt = currentPrompt.map((part, index) =>
+        index === 0 && "content" in part ? { ...part, content: part.content.replace(GOAL_PREFIX, "") } : part,
+      )
+      text = draftText(currentPrompt)
     }
 
     const currentModel = local.model.current()

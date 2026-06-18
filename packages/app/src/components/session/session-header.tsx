@@ -452,7 +452,7 @@ export function SessionHeader() {
                         onClick={toggleTerminal}
                         aria-label={language.t("command.terminal.toggle")}
                         aria-expanded={view().terminal.opened()}
-                        aria-controls="terminal-panel"
+                        aria-controls="review-panel"
                       >
                         <Icon size="small" name={view().terminal.opened() ? "terminal-active" : "terminal"} />
                       </Button>
