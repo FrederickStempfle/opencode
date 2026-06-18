@@ -183,7 +183,11 @@ export function SessionSidePanel(props: {
   const terminalFocused = createMemo(() => view().terminal.opened())
 
   const addTerminal = () => {
-    terminal.new()
+    // Only spawn explicitly when terminals already exist. With none open,
+    // `view().terminal.open()` triggers the auto-create effect below, which
+    // spawns the first one — calling `terminal.new()` here too would race it
+    // (the store updates async) and open two. Mirrors `openTerminal`.
+    if (terminal.all().length > 0) terminal.new()
     openReviewPanel()
     view().terminal.open()
   }
