@@ -146,6 +146,11 @@ export const SettingsGeneralV2: Component = () => {
   const autoOption = { id: "auto", value: "", label: language.t("settings.general.row.shell.autoDefault") }
   const currentShell = createMemo(() => serverSync().data.config.shell ?? "")
 
+  const followupOptions = createMemo(() => [
+    { id: "steer", value: "steer" as const, label: language.t("settings.general.row.followup.option.steer") },
+    { id: "queue", value: "queue" as const, label: language.t("settings.general.row.followup.option.queue") },
+  ])
+
   const shellOptions = createMemo<ShellSelectOption[]>(() => {
     const list = shells.latest
     const current = serverSync().data.config.shell
@@ -277,6 +282,23 @@ export const SettingsGeneralV2: Component = () => {
               if (option.value === currentShell()) return
               serverSync().updateConfig({ shell: option.value })
             }}
+          />
+        </SettingsRowV2>
+
+        <SettingsRowV2
+          title={language.t("settings.general.row.followup.title")}
+          description={language.t("settings.general.row.followup.description")}
+        >
+          <SelectV2
+            appearance="inline"
+            data-action="settings-followup"
+            options={followupOptions()}
+            current={followupOptions().find((o) => o.value === settings.general.followup()) ?? followupOptions()[0]}
+            placement="bottom-end"
+            gutter={6}
+            value={(o) => o.id}
+            label={(o) => o.label}
+            onSelect={(option) => option && settings.general.setFollowup(option.value)}
           />
         </SettingsRowV2>
 
